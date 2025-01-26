@@ -66,11 +66,11 @@ func createTableIfNotExists(db *sql.DB) {
 	query := `
 		CREATE TABLE IF NOT EXISTS prices (
 			id SERIAL PRIMARY KEY,
-			product_id INT,
-			name TEXT,
-			category TEXT,
-			price NUMERIC,
-			create_date DATE
+			product_id INT NOT NULL,
+			name TEXT NOT NULL,
+			category TEXT NOT NULL,
+			price NUMERIC NOT NULL,
+			create_date DATE NOT NULL
 		)
 	`
 	_, err := db.Exec(query)
@@ -120,11 +120,6 @@ func handlePostPrices(db *sql.DB, w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Println("Files in ZIP:")
-	for _, f := range zipReader.File {
-		log.Println(f.Name)
-	}
-
 	csvFile := findCSV(zipReader)
 	if csvFile == nil {
 		log.Println("CSV file not found in ZIP")
@@ -158,7 +153,7 @@ func handlePostPrices(db *sql.DB, w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_, _ = reader.Read()
+	_, _ = reader.Read() // Skip header row
 	inserted := 0
 
 	for {
@@ -181,20 +176,17 @@ func handlePostPrices(db *sql.DB, w http.ResponseWriter, r *http.Request) {
 
 		_, err = stmt.ExecContext(context.Background(), productID, record[1], record[2], price, date)
 		if err != nil {
-			log.Printf("Error inserting record: product_id=%d, name=%s, category=%s, price=%.2f, date=%s. Error: %v",
-				productID, record[1], record[2], price, date, err)
+			log.Printf("Error inserting record: %v", err)
 			continue
 		}
 		inserted++
 	}
 
-	log.Printf("Attempting to commit transaction. Rows inserted: %d", inserted)
 	if err := tx.Commit(); err != nil {
-		log.Printf("Error committing transaction. Inserted rows: %d. Error: %v", inserted, err)
+		log.Printf("Error committing transaction: %v", err)
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 		return
 	}
-	log.Println("Transaction committed successfully.")
 
 	result, err := getInsertResult(db, inserted)
 	if err != nil {
@@ -205,32 +197,6 @@ func handlePostPrices(db *sql.DB, w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(result)
-}
-
-func readFileToBytes(file io.Reader) ([]byte, error) {
-	var buf bytes.Buffer
-	_, err := io.Copy(&buf, file)
-	if err != nil {
-		return nil, err
-	}
-	return buf.Bytes(), nil
-}
-
-func findCSV(zr *zip.Reader) *zip.File {
-	for _, file := range zr.File {
-		if strings.HasSuffix(file.Name, "data.csv") {
-			return file
-		}
-	}
-	return nil
-}
-
-func openCSVFromZip(file *zip.File) (*csv.Reader, error) {
-	f, err := file.Open()
-	if err != nil {
-		return nil, err
-	}
-	return csv.NewReader(f), nil
 }
 
 func handleGetPrices(db *sql.DB, w http.ResponseWriter, r *http.Request) {
@@ -268,6 +234,7 @@ func handleGetPrices(db *sql.DB, w http.ResponseWriter, r *http.Request) {
 			createDate.Format("2006-01-02"),
 		})
 	}
+
 	if err := rows.Err(); err != nil {
 		log.Printf("Error iterating over rows: %v", err)
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
@@ -304,7 +271,7 @@ func handleGetPrices(db *sql.DB, w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/zip")
-	w.Header().Set("Content-Disposition", `attachment; filename="sample_data.zip"`)
+	w.Header().Set("Content-Disposition", `attachment; filename="prices.zip"`)
 	w.WriteHeader(http.StatusOK)
 	if _, err := w.Write(zipBuf.Bytes()); err != nil {
 		log.Printf("Error writing response: %v", err)
@@ -312,21 +279,47 @@ func handleGetPrices(db *sql.DB, w http.ResponseWriter, r *http.Request) {
 }
 
 func getInsertResult(db *sql.DB, inserted int) (*InsertResult, error) {
-	var categories int
-	err := db.QueryRow(`SELECT COUNT(DISTINCT category) FROM prices`).Scan(&categories)
+	var totalCategories int
+	err := db.QueryRow(`SELECT COUNT(DISTINCT category) FROM prices`).Scan(&totalCategories)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("error querying total categories: %v", err)
 	}
 
 	var totalPrice float64
 	err = db.QueryRow(`SELECT COALESCE(SUM(price), 0) FROM prices`).Scan(&totalPrice)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("error querying total price: %v", err)
 	}
 
 	return &InsertResult{
 		TotalItems:      inserted,
-		TotalCategories: categories,
+		TotalCategories: totalCategories,
 		TotalPrice:      totalPrice,
 	}, nil
+}
+
+func readFileToBytes(file io.Reader) ([]byte, error) {
+	var buf bytes.Buffer
+	_, err := io.Copy(&buf, file)
+	if err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+func findCSV(zr *zip.Reader) *zip.File {
+	for _, file := range zr.File {
+		if strings.HasSuffix(file.Name, "data.csv") {
+			return file
+		}
+	}
+	return nil
+}
+
+func openCSVFromZip(file *zip.File) (*csv.Reader, error) {
+	f, err := file.Open()
+	if err != nil {
+		return nil, err
+	}
+	return csv.NewReader(f), nil
 }
